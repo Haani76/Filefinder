@@ -69,6 +69,22 @@ def preview(path):
         return "text", f"Can't preview: {e}"
 
 
+def windows_dark():
+    """True when Windows apps are set to dark mode."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
+
+THEMES = {  # bg, panel (fields/lists), fg, muted, accent/link, selection
+    True: dict(bg="#1e1f22", panel="#2b2d31", fg="#e6e6e6", muted="#9aa0a6", link="#6cb4ff", sel="#3d5a80"),
+    False: dict(bg="#f3f3f3", panel="#ffffff", fg="#1b1b1b", muted="#5f6368", link="#0b62d6", sel="#cce4ff"),
+}
+
+
 def drives():
     return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
 
@@ -124,6 +140,8 @@ class App:
         ttk.Button(top, text="Stop", command=lambda: self.stop.set()).pack(side="left", padx=4)
         self.contents = tk.BooleanVar()
         ttk.Checkbutton(top, text="Search inside files (slower)", variable=self.contents).pack(side="left", padx=4)
+        self.dark = tk.BooleanVar(value=windows_dark())
+        ttk.Checkbutton(top, text="Dark mode", variable=self.dark, command=self.apply_theme).pack(side="left", padx=4)
 
         cols = ("name", "match", "type", "size", "modified", "created", "path")
         panes = ttk.PanedWindow(root, orient="horizontal")
@@ -151,7 +169,36 @@ class App:
         ttk.Button(bottom, text="Copy path", command=self.copy_path).pack(side="left")
         self.status = ttk.Label(root, text=f"Drives: {', '.join(drives())}", padding=(8, 0, 8, 6))
         self.status.pack(fill="x")
+        self.apply_theme()
         self.entry.focus()
+
+    def apply_theme(self):
+        dark = self.dark.get()
+        c = THEMES[dark]
+        s = ttk.Style()
+        s.theme_use("clam")  # the only built-in ttk theme that honours custom colours
+        s.configure(".", background=c["bg"], foreground=c["fg"], fieldbackground=c["panel"],
+                    bordercolor=c["panel"], lightcolor=c["bg"], darkcolor=c["bg"], troughcolor=c["bg"],
+                    insertcolor=c["fg"], selectbackground=c["sel"], selectforeground=c["fg"])
+        s.configure("TButton", background=c["panel"], padding=(10, 4))
+        s.map("TButton", background=[("active", c["sel"])])
+        s.map("TCheckbutton", background=[("active", c["bg"])], indicatorbackground=[("!selected", c["panel"])])
+        s.configure("Treeview", background=c["panel"], fieldbackground=c["panel"], foreground=c["fg"], rowheight=24)
+        s.map("Treeview", background=[("selected", c["sel"])], foreground=[("selected", c["fg"])])
+        s.configure("Treeview.Heading", background=c["bg"], foreground=c["muted"])
+        s.map("Treeview.Heading", background=[("active", c["panel"])])
+        self.root.configure(bg=c["bg"])
+        self.text.configure(bg=c["panel"], fg=c["fg"], insertbackground=c["fg"], relief="flat")
+        self.path.configure(bg=c["bg"], fg=c["link"])
+        self.image.configure(background=c["panel"])
+        try:  # dark title bar on Windows 10/11
+            import ctypes
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(dark)), 4)
+            self.root.withdraw(); self.root.deiconify()  # force the title bar to repaint
+        except Exception:
+            pass
 
     def start(self):
         term = self.entry.get().strip()

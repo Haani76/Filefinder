@@ -11,6 +11,7 @@ A small search box for Windows. Type part of a file or folder name and it search
   - PDFs: page count and text of the first 5 pages
   - Word, PowerPoint, Excel (`.docx`, `.pptx`, `.xlsx`): plain text
   - Folders: the list of items inside
+- **Dark mode**: starts in your Windows app theme; toggle it with the checkbox.
 - Enter searches, Esc closes. Skips `Windows`, `$Recycle.Bin`, `node_modules` and `.git`.
 
 ## Run
