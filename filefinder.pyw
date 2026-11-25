@@ -1,5 +1,5 @@
 """FileFinder: search every drive by file name (and optionally file contents). Double-click a result to open it."""
-import os, re, string, subprocess, threading, queue, datetime, zipfile, tkinter as tk
+import os, re, string, subprocess, threading, queue, datetime, zipfile, hashlib, tempfile, tkinter as tk
 from tkinter import ttk
 
 try:  # optional: image and PDF previews
@@ -10,6 +10,14 @@ try:
     from pypdf import PdfReader
 except ImportError:
     PdfReader = None
+try:  # optional: draws real PDF pages
+    import pypdfium2 as pdfium
+except ImportError:
+    pdfium = None
+try:  # optional: lets installed Microsoft Office convert documents for preview
+    import pythoncom, win32com.client
+except ImportError:
+    win32com = None
 
 SKIP = {"$recycle.bin", "system volume information", "windows", "node_modules", ".git", "__pycache__"}
 IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff"}
@@ -41,8 +49,80 @@ def file_text(path):
     return None
 
 
-def preview(path):
-    """Return ("image", PIL.Image) or ("text", str) describing the file at path."""
+WORD, POWERPOINT, EXCEL = {".doc", ".docx", ".rtf", ".odt"}, {".ppt", ".pptx", ".odp"}, {".xls", ".xlsx", ".ods"}
+MAX_PAGES = 10  # pages drawn in the preview
+CACHE = os.path.join(tempfile.gettempdir(), "FileFinderPreview")
+RENDER_LOCK = threading.Lock()  # one Office/pdfium job at a time; neither is safe to run in parallel
+
+
+def office_to_pdf(path):
+    """Have installed Office export the document to a cached PDF; returns its path. May raise."""
+    st = os.stat(path)
+    os.makedirs(CACHE, exist_ok=True)
+    out = os.path.join(CACHE, hashlib.md5(f"{path}|{st.st_mtime}|{st.st_size}".encode()).hexdigest() + ".pdf")
+    if os.path.exists(out):
+        return out
+    tmp = out[:-4] + ".tmp.pdf"
+    ext = os.path.splitext(path)[1].lower()
+    pythoncom.CoInitialize()
+    app = None
+    try:
+        if ext in WORD:
+            app = win32com.client.DispatchEx("Word.Application")
+            app.Visible, app.DisplayAlerts = False, 0
+            # positional: FileName, ConfirmConversions, ReadOnly, AddToRecentFiles, PasswordDocument
+            # (a dummy password makes protected files fail instead of popping a hidden prompt)
+            doc = app.Documents.Open(path, False, True, False, "x")
+            doc.ExportAsFixedFormat(tmp, 17)
+            doc.Close(False)
+            docs = app.Documents
+        elif ext in POWERPOINT:
+            app = win32com.client.DispatchEx("PowerPoint.Application")
+            pres = app.Presentations.Open(path, True, False, False)  # ReadOnly, Untitled, WithWindow
+            pres.SaveAs(tmp, 32)
+            pres.Close()
+            docs = app.Presentations
+        else:
+            app = win32com.client.DispatchEx("Excel.Application")
+            app.Visible, app.DisplayAlerts = False, False
+            wb = app.Workbooks.Open(path, 0, True, 5, "x")  # UpdateLinks, ReadOnly, Format, Password
+            wb.ExportAsFixedFormat(0, tmp)
+            wb.Close(False)
+            docs = app.Workbooks
+        os.replace(tmp, out)
+        return out
+    finally:
+        # PowerPoint is single-instance: never quit it if the user has their own files open
+        if app is not None and docs_count(locals().get("docs")) == 0:
+            try:
+                app.Quit()
+            except Exception:
+                pass
+        pythoncom.CoUninitialize()
+
+
+def docs_count(docs):
+    try:
+        return docs.Count
+    except Exception:
+        return 0
+
+
+def render_pdf(path, width):
+    """Draw the first MAX_PAGES pages at the given pixel width; returns (images, total_pages)."""
+    pdf = pdfium.PdfDocument(path)
+    try:
+        imgs = []
+        for i in range(min(len(pdf), MAX_PAGES)):
+            page = pdf[i]
+            imgs.append(page.render(scale=width / page.get_width()).to_pil())
+        return imgs, len(pdf)
+    finally:
+        pdf.close()
+
+
+def preview(path, width=520, still_wanted=lambda: True):
+    """Return ("pages", ([PIL images], total)) for things shown as they look, or ("text", str)."""
     if os.path.isdir(path):
         try:
             items = sorted(os.listdir(path))
@@ -53,8 +133,21 @@ def preview(path):
     try:
         if ext in IMAGES and Image:
             img = Image.open(path)
-            img.thumbnail((520, 520))
-            return "image", img
+            img.thumbnail((width, width * 3))
+            return "pages", ([img], 1)
+        if ext == ".pdf" and pdfium:
+            with RENDER_LOCK:
+                return "pages", render_pdf(path, width)
+        if ext in WORD | POWERPOINT | EXCEL and win32com and pdfium:
+            with RENDER_LOCK:
+                if not still_wanted():  # user already clicked something else; skip the slow Office step
+                    return "text", ""
+                try:
+                    return "pages", render_pdf(office_to_pdf(path), width)
+                except Exception as e:
+                    if ext not in OFFICE:
+                        raise
+                    return "text", f"(Office couldn't render this file: {e})\n\n" + office_text(path)[:MAX_TEXT]
         if ext == ".pdf" and PdfReader:
             pages = PdfReader(path).pages
             return "text", f"PDF, {len(pages)} pages\n\n" + "\n".join((p.extract_text() or "") for p in pages[:5])[:MAX_TEXT]
@@ -153,7 +246,14 @@ class App:
         side = ttk.Frame(panes)
         panes.add(self.tree, weight=3)
         panes.add(side, weight=2)
-        self.image = ttk.Label(side, anchor="center")
+        self.pages = ttk.Frame(side)
+        self.canvas = tk.Canvas(self.pages, highlightthickness=0)
+        bar = ttk.Scrollbar(self.pages, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(-e.delta // 120, "units"))
+        self.photos, self.ptoken = [], 0
         self.text = tk.Text(side, wrap="word", font=("Consolas", 10), state="disabled")
         self.text.pack(fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda e: self.open_file())
@@ -190,7 +290,8 @@ class App:
         self.root.configure(bg=c["bg"])
         self.text.configure(bg=c["panel"], fg=c["fg"], insertbackground=c["fg"], relief="flat")
         self.path.configure(bg=c["bg"], fg=c["link"])
-        self.image.configure(background=c["panel"])
+        self.canvas.configure(bg=c["bg"])
+        self.theme = c
         try:  # dark title bar on Windows 10/11
             import ctypes
             self.root.update_idletasks()
@@ -239,19 +340,47 @@ class App:
         self.path.config(text=p or "")
         if not p:
             return
-        kind, data = preview(p)
-        if kind == "image":
-            self.photo = ImageTk.PhotoImage(data)  # keep a reference or Tk drops it
-            self.image.config(image=self.photo)
-            self.text.pack_forget()
-            self.image.pack(fill="both", expand=True)
-        else:
-            self.image.pack_forget()
-            self.text.pack(fill="both", expand=True)
-            self.text.config(state="normal")
-            self.text.delete("1.0", "end")
-            self.text.insert("1.0", data)
-            self.text.config(state="disabled")
+        self.ptoken += 1
+        token, box = self.ptoken, {}
+        width = max(self.canvas.winfo_width(), 400) - 24
+        self.show_text("Loading preview…")
+        # rendering (especially via Office) can take seconds, so do it off the UI thread
+        threading.Thread(target=lambda: box.update(r=preview(p, width, lambda: token == self.ptoken)), daemon=True).start()
+        self.wait_preview(token, box)
+
+    def wait_preview(self, token, box):
+        if token != self.ptoken:  # a newer click took over
+            return
+        if "r" not in box:
+            self.root.after(100, self.wait_preview, token, box)
+            return
+        kind, data = box["r"]
+        if kind == "text":
+            self.show_text(data)
+            return
+        imgs, total = data
+        self.text.pack_forget()
+        self.pages.pack(fill="both", expand=True)
+        self.canvas.delete("all")
+        self.photos = [ImageTk.PhotoImage(i) for i in imgs]  # keep references or Tk drops them
+        y = 8
+        for ph in self.photos:
+            self.canvas.create_image(8, y, image=ph, anchor="nw")
+            y += ph.height() + 12
+        if total > len(imgs):
+            self.canvas.create_text(8, y, anchor="nw", fill=self.theme["muted"],
+                                    text=f"Showing {len(imgs)} of {total} pages. Open the file to see the rest.")
+            y += 30
+        self.canvas.configure(scrollregion=(0, 0, 0, y))
+        self.canvas.yview_moveto(0)
+
+    def show_text(self, data):
+        self.pages.pack_forget()
+        self.text.pack(fill="both", expand=True)
+        self.text.config(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", data)
+        self.text.config(state="disabled")
 
     def open_file(self):
         if p := self.selected():

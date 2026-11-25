@@ -7,22 +7,22 @@ A small search box for Windows. Type part of a file or folder name and it search
 - Double-click a result to open it; click the path to show it in Explorer; **Copy path** copies it.
 - Click a result to preview it on the right (drag the divider to resize):
   - Text and code files: the first 20,000 characters
-  - Images (PNG, JPG, GIF, BMP, WebP, ICO, TIFF): a thumbnail
-  - PDFs: page count and text of the first 5 pages
-  - Word, PowerPoint, Excel (`.docx`, `.pptx`, `.xlsx`): plain text
+  - Images (PNG, JPG, GIF, BMP, WebP, ICO, TIFF): the image
+  - PDFs: the real pages, as they look (first 10 pages; scroll with the mouse wheel)
+  - Word, PowerPoint, Excel (`.doc/.docx/.rtf/.odt`, `.ppt/.pptx/.odp`, `.xls/.xlsx/.ods`): the real pages, as they look. Your installed Microsoft Office converts them in the background, so the first preview of a file takes a few seconds; after that it's cached. Without Office, `.docx/.pptx/.xlsx` fall back to plain text.
   - Folders: the list of items inside
 - **Dark mode**: starts in your Windows app theme; toggle it with the checkbox.
 - Enter searches, Esc closes. Skips `Windows`, `$Recycle.Bin`, `node_modules` and `.git`.
 
 ## Run
 
-Needs Python 3.8+ (tkinter is included). For image and PDF previews, also install:
+Needs Python 3.8+ (tkinter is included). For page previews and searching inside PDFs, also install:
 
 ```
-pip install pillow pypdf
+pip install pillow pypdf pypdfium2 pywin32
 ```
 
-Without them the app still works; those files just show "No preview".
+Without them the app still works; previews fall back to plain text or "No preview".
 
 ```
 pythonw filefinder.pyw
