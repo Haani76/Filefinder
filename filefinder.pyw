@@ -1,4 +1,4 @@
-"""FileFinder: type part of a file name, search every drive. Double-click a result to open it."""
+"""FileFinder: search every drive by file name (and optionally file contents). Double-click a result to open it."""
 import os, re, string, subprocess, threading, queue, datetime, zipfile, tkinter as tk
 from tkinter import ttk
 
@@ -14,6 +14,31 @@ except ImportError:
 SKIP = {"$recycle.bin", "system volume information", "windows", "node_modules", ".git", "__pycache__"}
 IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff"}
 MAX_TEXT = 20000  # characters shown in the preview
+OFFICE = {".docx", ".pptx", ".xlsx"}
+TEXT = {".txt", ".md", ".csv", ".tsv", ".json", ".xml", ".html", ".htm", ".css", ".js", ".jsx", ".ts", ".tsx",
+        ".py", ".pyw", ".java", ".c", ".h", ".cpp", ".cs", ".go", ".rs", ".php", ".rb", ".sql", ".sh", ".bat",
+        ".ps1", ".ini", ".cfg", ".conf", ".yml", ".yaml", ".toml", ".log", ".tex", ".rtf", ".srt"}
+CONTENT_MAX_BYTES = 20 * 1024 * 1024  # skip bigger files in content search; they make it crawl
+
+
+def office_text(path):
+    with zipfile.ZipFile(path) as z:
+        xml = " ".join(z.read(n).decode("utf8", "ignore") for n in z.namelist()
+                       if re.match(r"(word/document|ppt/slides/slide\d+|xl/sharedStrings)\.xml", n))
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", xml)).strip()
+
+
+def file_text(path):
+    """Full searchable text of a text/PDF/Office file, or None if the type isn't searchable. May raise."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf" and PdfReader:
+        return "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
+    if ext in OFFICE:
+        return office_text(path)
+    if ext in TEXT:
+        with open(path, "rb") as f:
+            return f.read().decode("utf8", "replace")
+    return None
 
 
 def preview(path):
@@ -33,11 +58,8 @@ def preview(path):
         if ext == ".pdf" and PdfReader:
             pages = PdfReader(path).pages
             return "text", f"PDF, {len(pages)} pages\n\n" + "\n".join((p.extract_text() or "") for p in pages[:5])[:MAX_TEXT]
-        if ext in (".docx", ".pptx", ".xlsx"):
-            with zipfile.ZipFile(path) as z:
-                xml = " ".join(z.read(n).decode("utf8", "ignore") for n in z.namelist()
-                               if re.match(r"(word/document|ppt/slides/slide\d+|xl/sharedStrings)\.xml", n))
-            return "text", re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", xml)).strip()[:MAX_TEXT]
+        if ext in OFFICE:
+            return "text", office_text(path)[:MAX_TEXT]
         with open(path, "rb") as f:
             raw = f.read(MAX_TEXT)
         if b"\0" in raw:
@@ -51,8 +73,8 @@ def drives():
     return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
 
 
-def search(term, roots, stop, out):
-    """Walk every root; put (path, is_dir) for names containing term (case-insensitive)."""
+def search(term, roots, stop, out, contents=False):
+    """Walk every root; put (path, is_dir, "name"|"content") for matches (case-insensitive)."""
     term = term.lower()
     for root in roots:
         for cur, dirs, files in os.walk(root, onerror=lambda e: None):
@@ -61,10 +83,21 @@ def search(term, roots, stop, out):
             dirs[:] = [d for d in dirs if d.lower() not in SKIP]
             for name in dirs:
                 if term in name.lower():
-                    out.put((os.path.join(cur, name), True))
+                    out.put((os.path.join(cur, name), True, "name"))
             for name in files:
+                p = os.path.join(cur, name)
                 if term in name.lower():
-                    out.put((os.path.join(cur, name), False))
+                    out.put((p, False, "name"))
+                elif contents:
+                    if stop.is_set():
+                        return
+                    try:
+                        if os.path.getsize(p) <= CONTENT_MAX_BYTES:
+                            t = file_text(p)
+                            if t and term in t.lower():
+                                out.put((p, False, "content"))
+                    except Exception:  # locked/corrupt files: skip, keep searching
+                        pass
 
 
 def human(n):
@@ -88,13 +121,15 @@ class App:
         self.entry.bind("<Return>", lambda e: self.start())
         root.bind("<Escape>", lambda e: root.destroy())
         ttk.Button(top, text="Search", command=self.start).pack(side="left")
-        ttk.Button(top, text="Stop", command=self.stop.set).pack(side="left", padx=4)
+        ttk.Button(top, text="Stop", command=lambda: self.stop.set()).pack(side="left", padx=4)
+        self.contents = tk.BooleanVar()
+        ttk.Checkbutton(top, text="Search inside files (slower)", variable=self.contents).pack(side="left", padx=4)
 
-        cols = ("name", "type", "size", "modified", "created", "path")
+        cols = ("name", "match", "type", "size", "modified", "created", "path")
         panes = ttk.PanedWindow(root, orient="horizontal")
         panes.pack(fill="both", expand=True, padx=8)
         self.tree = ttk.Treeview(panes, columns=cols, show="headings")
-        for c, w in zip(cols, (200, 60, 70, 120, 120, 300)):
+        for c, w in zip(cols, (200, 65, 60, 70, 120, 120, 300)):
             self.tree.heading(c, text=c.title())
             self.tree.column(c, width=w, anchor="w")
         side = ttk.Frame(panes)
@@ -126,7 +161,7 @@ class App:
         self.stop, self.q, self.count = threading.Event(), queue.Queue(), 0
         self.tree.delete(*self.tree.get_children())
         self.status.config(text=f"Searching for “{term}”…")
-        t = threading.Thread(target=search, args=(term, drives(), self.stop, self.q), daemon=True)
+        t = threading.Thread(target=search, args=(term, drives(), self.stop, self.q, self.contents.get()), daemon=True)
         t.start()
         self.poll(t, self.q)
 
@@ -134,12 +169,12 @@ class App:
         if q is not self.q:  # a newer search replaced this one
             return
         while not q.empty():
-            p, is_dir = q.get()
+            p, is_dir, how = q.get()
             try:
                 st = os.stat(p)
                 fmt = lambda ts: datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
                 kind = "Folder" if is_dir else (os.path.splitext(p)[1].lstrip(".").upper() or "File")
-                self.tree.insert("", "end", iid=p, values=(os.path.basename(p), kind, "" if is_dir else human(st.st_size), fmt(st.st_mtime), fmt(st.st_ctime), p))
+                self.tree.insert("", "end", iid=p, values=(os.path.basename(p), how.title(), kind, "" if is_dir else human(st.st_size), fmt(st.st_mtime), fmt(st.st_ctime), p))
                 self.count += 1
             except OSError:
                 pass

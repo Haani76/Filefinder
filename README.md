@@ -2,6 +2,7 @@
 
 A small search box for Windows. Type part of a file or folder name and it searches every drive, every folder, every file.
 
+- Tick **Search inside files** to also match text inside files: text and code files, PDFs, and Word/PowerPoint/Excel (`.docx`, `.pptx`, `.xlsx`). Files over 20 MB are skipped. It's much slower than a name search; the **Match** column says whether a result matched by name or content.
 - Results show name, type, size, modified and created dates, and the full path.
 - Double-click a result to open it; click the path to show it in Explorer; **Copy path** copies it.
 - Click a result to preview it on the right (drag the divider to resize):
