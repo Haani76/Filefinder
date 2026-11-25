@@ -11,6 +11,7 @@ A small search box for Windows. Type part of a file or folder name and it search
   - PDFs: the real pages, as they look (first 10 pages; scroll with the mouse wheel)
   - Word, PowerPoint, Excel (`.doc/.docx/.rtf/.odt`, `.ppt/.pptx/.odp`, `.xls/.xlsx/.ods`): the real pages, as they look. Your installed Microsoft Office converts them in the background, so the first preview of a file takes a few seconds; after that it's cached. Without Office, `.docx/.pptx/.xlsx` fall back to plain text.
   - Folders: the list of items inside
+  - In page/image previews: **mouse wheel zooms** in and out around the cursor (20%–600%), **drag** to move around, use the horizontal/vertical scrollbars to seek, **double-click** to fit the width again.
 - **Dark mode**: starts in your Windows app theme; toggle it with the checkbox.
 - Enter searches, Esc closes. Skips `Windows`, `$Recycle.Bin`, `node_modules` and `.git`.
 

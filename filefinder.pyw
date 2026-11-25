@@ -134,6 +134,7 @@ def preview(path, width=520, still_wanted=lambda: True):
         if ext in IMAGES and Image:
             img = Image.open(path)
             img.thumbnail((width, width * 3))
+            img.load()  # read pixels now, in this thread, not later on the UI thread
             return "pages", ([img], 1)
         if ext == ".pdf" and pdfium:
             with RENDER_LOCK:
@@ -248,12 +249,17 @@ class App:
         panes.add(side, weight=2)
         self.pages = ttk.Frame(side)
         self.canvas = tk.Canvas(self.pages, highlightthickness=0)
-        bar = ttk.Scrollbar(self.pages, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=bar.set)
-        bar.pack(side="right", fill="y")
+        vbar = ttk.Scrollbar(self.pages, orient="vertical", command=self.canvas.yview)
+        hbar = ttk.Scrollbar(self.pages, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set, cursor="fleur")
+        hbar.pack(side="bottom", fill="x")
+        vbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.canvas.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(-e.delta // 120, "units"))
-        self.photos, self.ptoken = [], 0
+        self.canvas.bind("<MouseWheel>", self.zoom_at)  # wheel zooms around the cursor
+        self.canvas.bind("<ButtonPress-1>", lambda e: self.canvas.scan_mark(e.x, e.y))  # drag to pan
+        self.canvas.bind("<B1-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        self.canvas.bind("<Double-1>", lambda e: self.set_zoom(1.0))  # back to fit-width
+        self.photos, self.src, self.ptoken, self.zoom, self.base, self.total = [], [], 0, 1.0, 500, 0
         self.text = tk.Text(side, wrap="word", font=("Consolas", 10), state="disabled")
         self.text.pack(fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda e: self.open_file())
@@ -342,10 +348,11 @@ class App:
             return
         self.ptoken += 1
         token, box = self.ptoken, {}
-        width = max(self.canvas.winfo_width(), 400) - 24
+        self.base = max(self.canvas.winfo_width(), 400) - 24  # fit-to-width size in pixels
         self.show_text("Loading preview…")
-        # rendering (especially via Office) can take seconds, so do it off the UI thread
-        threading.Thread(target=lambda: box.update(r=preview(p, width, lambda: token == self.ptoken)), daemon=True).start()
+        # render at 2x so zooming in stays sharp; rendering (especially via Office) can take
+        # seconds, so do it off the UI thread
+        threading.Thread(target=lambda: box.update(r=preview(p, self.base * 2, lambda: token == self.ptoken)), daemon=True).start()
         self.wait_preview(token, box)
 
     def wait_preview(self, token, box):
@@ -358,21 +365,46 @@ class App:
         if kind == "text":
             self.show_text(data)
             return
-        imgs, total = data
+        self.src, self.total, self.zoom = data[0], data[1], 1.0
         self.text.pack_forget()
         self.pages.pack(fill="both", expand=True)
-        self.canvas.delete("all")
-        self.photos = [ImageTk.PhotoImage(i) for i in imgs]  # keep references or Tk drops them
-        y = 8
-        for ph in self.photos:
-            self.canvas.create_image(8, y, image=ph, anchor="nw")
-            y += ph.height() + 12
-        if total > len(imgs):
-            self.canvas.create_text(8, y, anchor="nw", fill=self.theme["muted"],
-                                    text=f"Showing {len(imgs)} of {total} pages. Open the file to see the rest.")
-            y += 30
-        self.canvas.configure(scrollregion=(0, 0, 0, y))
+        self.draw_pages()
+        self.canvas.xview_moveto(0)
         self.canvas.yview_moveto(0)
+
+    def draw_pages(self):
+        """Lay out self.src at the current zoom. Margins scale too, so zoom maps points proportionally."""
+        c, z = self.canvas, self.zoom
+        c.delete("all")
+        m, y, right, self.photos = 8 * z, 8 * z, 0, []
+        for img in self.src:
+            f = z * min(1, self.base / img.width)  # 1.0 zoom = fit width (small images aren't blown up)
+            w, h = max(1, round(img.width * f)), max(1, round(img.height * f))
+            self.photos.append(ImageTk.PhotoImage(img.resize((w, h), Image.BILINEAR)))  # keep refs or Tk drops them
+            c.create_image(m, y, image=self.photos[-1], anchor="nw")
+            y, right = y + h + 12 * z, max(right, m + w + m)
+        if self.total > len(self.src):
+            c.create_text(m, y, anchor="nw", fill=self.theme["muted"],
+                          text=f"Showing {len(self.src)} of {self.total} pages. Open the file to see the rest.")
+            y += 30
+        c.configure(scrollregion=(0, 0, right, y))
+
+    def set_zoom(self, z, x=0, y=0):
+        """Zoom to z, keeping the content under canvas pixel (x, y) fixed."""
+        z = min(max(z, 0.2), 6.0)
+        if not self.src or z == self.zoom:
+            return
+        c = self.canvas
+        cx, cy, r = c.canvasx(x), c.canvasy(y), z / self.zoom
+        self.zoom = z
+        self.draw_pages()
+        _, _, w, h = map(float, c.cget("scrollregion").split())
+        c.xview_moveto(max(0, cx * r - x) / w)
+        c.yview_moveto(max(0, cy * r - y) / h)
+        self.status.config(text=f"Zoom {round(z * 100)}%  (wheel: zoom · drag: move · double-click: fit)")
+
+    def zoom_at(self, e):
+        self.set_zoom(self.zoom * (1.15 if e.delta > 0 else 1 / 1.15), e.x, e.y)
 
     def show_text(self, data):
         self.pages.pack_forget()
